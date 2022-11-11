@@ -372,11 +372,10 @@ fn find_path_deps(cargo_metadata: &Metadata) -> Result<HashMap<String, PathBuf>>
                 // we search for the respective package by `manifest_path`, there seems
                 // to be no way to query the dependency graph given `dependency`
                 let dep_manifest_path = path.join("Cargo.toml");
-                path_deps.insert(
+                if path_deps.insert(
                     dependency.name.clone(),
                     PathBuf::from(dep_manifest_path.clone()),
-                );
-                if let Some(dep_package) = cargo_metadata
+                ).is_none() && let Some(dep_package) = cargo_metadata
                     .packages
                     .iter()
                     .find(|package| package.manifest_path == dep_manifest_path)
