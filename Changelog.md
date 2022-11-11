@@ -16,8 +16,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 * Add `--src` option to generate src layout for mixed Python/Rust projects in [#1189](https://github.com/PyO3/maturin/pull/1189)
 * Add Python metadata support for `license-file` field of `Cargo.toml` in [#1195](https://github.com/PyO3/maturin/pull/1195)
 * Upgrade to clap 4.0 in [#1197](https://github.com/PyO3/maturin/pull/1197). This bumps MSRV to 1.61.0.
+* Remove `workspace.members` in `Cargo.toml` from sdist if there isn't any path dependency in #[1227](https://github.com/PyO3/maturin/pull/1227)
+* Fix auditwheel `libpython` check on Python 3.7 and older versions in [#1229](https://github.com/PyO3/maturin/pull/1229)
+* Use generic tags when `sys.implementation.name` != `platform.python_implementation()` in [#1232](https://github.com/PyO3/maturin/pull/1232).
+  Fixes the compatibility tags for Pyston.
+* Set default macOS deployment target version if `MACOSX_DEPLOYMENT_TARGET` isn't specified in [#1251](https://github.com/PyO3/maturin/pull/1251)
+* Add support for 32-bit x86 FreeBSD target in [#1254](https://github.com/PyO3/maturin/pull/1254)
+* Add `[tool.maturin.include]` and `[tool.maturin.exclude]` and deprecate `[tool.maturin.sdist-include]` [#1255](https://github.com/PyO3/maturin/pull/1255)
+* Ignore sdist tar ball instead of error out in [#1259](https://github.com/PyO3/maturin/pull/1259)
+
+## [0.13.7] - 2022-10-29
+
 * Fix macOS `LC_ID_DYLIB` for abi3 wheels in [#1208](https://github.com/PyO3/maturin/pull/1208)
 * Pass `--locked` to Cargo when bootstrap from sdist in [#1212](https://github.com/PyO3/maturin/pull/1212)
+* Fix build for Python 3.11 on Windows in [#1222](https://github.com/PyO3/maturin/pull/1222)
 
 ## [0.13.6] - 2022-10-08
 
@@ -729,7 +741,8 @@ points-0.1.0-py2.py3-none-manylinux1_x86_64.whl | 2,8M | 752K | 85K
 
  * Initial Release
 
-[Unreleased]: https://github.com/pyo3/maturin/compare/v0.13.6...HEAD
+[Unreleased]: https://github.com/pyo3/maturin/compare/v0.13.7...HEAD
+[0.13.7]: https://github.com/pyo3/maturin/compare/v0.13.6...v0.13.7
 [0.13.6]: https://github.com/pyo3/maturin/compare/v0.13.5...v0.13.6
 [0.13.5]: https://github.com/pyo3/maturin/compare/v0.13.4...v0.13.5
 [0.13.4]: https://github.com/pyo3/maturin/compare/v0.13.3...v0.13.4

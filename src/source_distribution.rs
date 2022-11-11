@@ -1,8 +1,10 @@
 use crate::module_writer::{add_data, ModuleWriter};
-use crate::{BuildContext, PyProjectToml, SDistWriter};
+use crate::polyfill::MetadataCommandExt;
+use crate::{pyproject_toml::Format, BuildContext, PyProjectToml, SDistWriter};
 use anyhow::{bail, Context, Result};
 use cargo_metadata::{Metadata, MetadataCommand};
 use fs_err as fs;
+use ignore::overrides::Override;
 use normpath::PathExt as _;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -48,7 +50,7 @@ fn rewrite_cargo_toml(
     root_crate: bool,
 ) -> Result<String> {
     let manifest_path = manifest_path.as_ref();
-    let text = fs::read_to_string(&manifest_path).context(format!(
+    let text = fs::read_to_string(manifest_path).context(format!(
         "Can't read Cargo.toml at {}",
         manifest_path.display(),
     ))?;
@@ -63,10 +65,10 @@ fn rewrite_cargo_toml(
     //                          ^^^^^^^^^^^^^^^^^^ table[&dep_name]["path"]
     // ^^^^^^^^^^^^^ dep_name
     for dep_category in &["dependencies", "dev-dependencies", "build-dependencies"] {
-        if let Some(table) = data.get_mut(*dep_category).and_then(|x| x.as_table_mut()) {
+        if let Some(table) = data.get_mut(dep_category).and_then(|x| x.as_table_mut()) {
             let workspace_deps = workspace_manifest
                 .get("workspace")
-                .and_then(|x| x.get(dep_category))
+                .and_then(|x| x.get("dependencies"))
                 .and_then(|x| x.as_table_like());
             let dep_names: Vec<_> = table.iter().map(|(key, _)| key.to_string()).collect();
             for dep_name in dep_names {
@@ -106,11 +108,13 @@ fn rewrite_cargo_toml(
                             let mut workspace_dep = workspace_dep.clone();
                             // Merge optional and features from the current Cargo.toml
                             if table[&dep_name].get("optional").is_some() {
+                                ensure_dep_is_inline_table(&mut workspace_dep);
                                 workspace_dep["optional"] = table[&dep_name]["optional"].clone();
                             }
                             if let Some(features) =
                                 table[&dep_name].get("features").and_then(|x| x.as_array())
                             {
+                                ensure_dep_is_inline_table(&mut workspace_dep);
                                 let existing_features = workspace_dep
                                     .as_table_like_mut()
                                     .unwrap()
@@ -187,20 +191,31 @@ fn rewrite_cargo_toml(
         // Update workspace members
         if let Some(workspace) = data.get_mut("workspace").and_then(|x| x.as_table_mut()) {
             if let Some(members) = workspace.get_mut("members").and_then(|x| x.as_array_mut()) {
-                let mut new_members = toml_edit::Array::new();
-                for member in members.iter() {
-                    if let toml_edit::Value::String(ref s) = member {
-                        let path = Path::new(s.value());
-                        if let Some(name) = path.file_name().and_then(|x| x.to_str()) {
-                            if known_path_deps.contains_key(name) {
-                                new_members.push(format!("{}/{}", LOCAL_DEPENDENCIES_FOLDER, name));
+                if known_path_deps.is_empty() {
+                    // Remove workspace members when there isn't any path dep
+                    workspace.remove("members");
+                    if workspace.is_empty() {
+                        // Remove workspace all together if it's empty
+                        data.remove("workspace");
+                    }
+                    rewritten = true;
+                } else {
+                    let mut new_members = toml_edit::Array::new();
+                    for member in members.iter() {
+                        if let toml_edit::Value::String(ref s) = member {
+                            let path = Path::new(s.value());
+                            if let Some(name) = path.file_name().and_then(|x| x.to_str()) {
+                                if known_path_deps.contains_key(name) {
+                                    new_members
+                                        .push(format!("{}/{}", LOCAL_DEPENDENCIES_FOLDER, name));
+                                }
                             }
                         }
                     }
-                }
-                if !new_members.is_empty() {
-                    workspace["members"] = toml_edit::value(new_members);
-                    rewritten = true;
+                    if !new_members.is_empty() {
+                        workspace["members"] = toml_edit::value(new_members);
+                        rewritten = true;
+                    }
                 }
             }
         }
@@ -226,6 +241,20 @@ fn rewrite_cargo_toml(
     }
 }
 
+/// Make sure that the dep entry is an inline table
+/// e.g. in the form of `{ version = "..." }`
+/// so that we can add entries for `optional` and `features`
+fn ensure_dep_is_inline_table(dep: &mut toml_edit::Item) {
+    if let Some(v) = dep.as_value_mut() {
+        if v.is_str() {
+            let val = std::mem::replace(v, toml_edit::Value::from(false));
+            let mut tab = toml_edit::InlineTable::new();
+            tab.insert("version", val);
+            *v = toml_edit::Value::InlineTable(tab);
+        }
+    }
+}
+
 /// Copies the files of a crate to a source distribution, recursively adding path dependencies
 /// and rewriting path entries in Cargo.toml
 ///
@@ -242,7 +271,7 @@ fn add_crate_to_source_distribution(
     let manifest_path = manifest_path.as_ref();
     let pyproject_toml_path = pyproject_toml_path.as_ref();
     let output = Command::new("cargo")
-        .args(&["package", "--list", "--allow-dirty", "--manifest-path"])
+        .args(["package", "--list", "--allow-dirty", "--manifest-path"])
         .arg(manifest_path)
         .output()
         .with_context(|| {
@@ -272,7 +301,7 @@ fn add_crate_to_source_distribution(
     let pyproject_dir = pyproject_toml_path.parent().unwrap();
     let cargo_toml_in_subdir = root_crate
         && abs_manifest_dir != pyproject_dir
-        && abs_manifest_dir.starts_with(&pyproject_dir);
+        && abs_manifest_dir.starts_with(pyproject_dir);
 
     // manifest_dir should be a relative path
     let manifest_dir = manifest_path.parent().unwrap();
@@ -282,7 +311,7 @@ fn add_crate_to_source_distribution(
             let relative_to_cwd = manifest_dir.join(relative_to_manifests);
             if root_crate && cargo_toml_in_subdir {
                 let relative_to_project_root = abs_manifest_dir
-                    .strip_prefix(&pyproject_dir)
+                    .strip_prefix(pyproject_dir)
                     .unwrap()
                     .join(relative_to_manifests);
                 (relative_to_project_root, relative_to_cwd)
@@ -292,9 +321,17 @@ fn add_crate_to_source_distribution(
         })
         // We rewrite Cargo.toml and add it separately
         .filter(|(target, source)| {
+            #[allow(clippy::if_same_then_else)]
             // Skip generated files. See https://github.com/rust-lang/cargo/issues/7938#issuecomment-593280660
             // and https://github.com/PyO3/maturin/issues/449
             if target == Path::new("Cargo.toml.orig") || target == Path::new("Cargo.toml") {
+                false
+            } else if matches!(target.extension(), Some(ext) if ext == "pyc" || ext == "pyd" || ext == "so") {
+                // Technically, `cargo package --list` should handle this,
+                // but somehow it doesn't on Alpine Linux running in GitHub Actions,
+                // so we do it manually here.
+                // See https://github.com/PyO3/maturin/pull/1255#issuecomment-1308838786
+                debug!("Ignoring {}", target.display());
                 false
             } else {
                 source.exists()
@@ -333,7 +370,7 @@ fn add_crate_to_source_distribution(
         LOCAL_DEPENDENCIES_FOLDER.to_string()
     };
     let rewritten_cargo_toml = rewrite_cargo_toml(
-        &manifest_path,
+        manifest_path,
         workspace_manifest,
         known_path_deps,
         local_deps_folder,
@@ -398,6 +435,7 @@ fn find_path_deps(cargo_metadata: &Metadata) -> Result<HashMap<String, PathBuf>>
 pub fn source_distribution(
     build_context: &BuildContext,
     pyproject: &PyProjectToml,
+    excludes: Option<Override>,
 ) -> Result<PathBuf> {
     let metadata21 = &build_context.metadata21;
     let manifest_path = &build_context.manifest_path;
@@ -414,7 +452,7 @@ pub fn source_distribution(
 
     let known_path_deps = find_path_deps(&build_context.cargo_metadata)?;
 
-    let mut writer = SDistWriter::new(&build_context.out, metadata21)?;
+    let mut writer = SDistWriter::new(&build_context.out, metadata21, excludes)?;
     let root_dir = PathBuf::from(format!(
         "{}-{}",
         &metadata21.get_distribution_escaped(),
@@ -430,7 +468,7 @@ pub fn source_distribution(
             .manifest_path(path_dep)
             // We don't need to resolve the dependency graph
             .no_deps()
-            .exec()
+            .exec_inherit_stderr()
             .with_context(|| {
                 format!(
                     "Cargo metadata failed for {} at '{}'",
@@ -454,7 +492,7 @@ pub fn source_distribution(
         add_crate_to_source_distribution(
             &mut writer,
             &pyproject_toml_path,
-            &path_dep,
+            path_dep,
             path_dep_workspace_manifest,
             &root_dir.join(LOCAL_DEPENDENCIES_FOLDER).join(name),
             &known_path_deps,
@@ -471,7 +509,7 @@ pub fn source_distribution(
     add_crate_to_source_distribution(
         &mut writer,
         &pyproject_toml_path,
-        &manifest_path,
+        manifest_path,
         &workspace_manifest,
         &root_dir,
         &known_path_deps,
@@ -488,11 +526,11 @@ pub fn source_distribution(
         let relative_cargo_lock = if cargo_lock_path.starts_with(project_root) {
             cargo_lock_path.strip_prefix(project_root).unwrap()
         } else {
-            cargo_lock_path.strip_prefix(&abs_manifest_dir).unwrap()
+            cargo_lock_path.strip_prefix(abs_manifest_dir).unwrap()
         };
         writer.add_file(root_dir.join(relative_cargo_lock), &cargo_lock_path)?;
     } else {
-        println!(
+        eprintln!(
             "⚠️  Warning: Cargo.lock is not found, it is recommended \
             to include it in the source distribution"
         );
@@ -515,7 +553,7 @@ pub fn source_distribution(
                 debug!("Ignoring {}", source.display());
                 continue;
             }
-            let target = root_dir.join(source.strip_prefix(&pyproject_dir).unwrap());
+            let target = root_dir.join(source.strip_prefix(pyproject_dir).unwrap());
             if source.is_dir() {
                 writer.add_directory(target)?;
             } else {
@@ -538,20 +576,38 @@ pub fn source_distribution(
         }
     }
 
-    if let Some(include_targets) = pyproject.sdist_include() {
-        for pattern in include_targets {
-            println!("📦 Including files matching \"{}\"", pattern);
-            for source in glob::glob(&pyproject_dir.join(pattern).to_string_lossy())
-                .expect("No files found for pattern")
-                .filter_map(Result::ok)
-            {
-                let target = root_dir.join(&source.strip_prefix(pyproject_dir).unwrap());
-                if source.is_dir() {
-                    writer.add_directory(target)?;
-                } else {
-                    writer.add_file(target, source)?;
-                }
+    let mut include = |pattern| -> Result<()> {
+        println!("📦 Including files matching \"{}\"", pattern);
+        for source in glob::glob(&pyproject_dir.join(pattern).to_string_lossy())
+            .expect("No files found for pattern")
+            .filter_map(Result::ok)
+        {
+            let target = root_dir.join(source.strip_prefix(pyproject_dir).unwrap());
+            if source.is_dir() {
+                writer.add_directory(target)?;
+            } else {
+                writer.add_file(target, source)?;
             }
+        }
+        Ok(())
+    };
+
+    #[allow(deprecated)]
+    if let Some(include_targets) = pyproject.sdist_include() {
+        eprintln!(
+            "⚠️  Warning: `[tool.maturin.sdist-include]` is deprecated, please use `[tool.maturin.include]`"
+        );
+        for pattern in include_targets {
+            include(pattern.as_str())?;
+        }
+    }
+
+    if let Some(glob_patterns) = pyproject.include() {
+        for pattern in glob_patterns
+            .iter()
+            .filter_map(|glob_pattern| glob_pattern.targets(Format::Sdist))
+        {
+            include(pattern)?;
         }
     }
 

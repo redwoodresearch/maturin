@@ -18,7 +18,7 @@ pub fn check_installed(package: &Path, python: &Path) -> Result<()> {
     let path = if cfg!(windows) {
         // on Windows, also add Scripts to PATH
         let python_dir = python.parent().unwrap();
-        env::join_paths(&[&python_dir.join("Scripts"), python_dir])?.into()
+        env::join_paths([&python_dir.join("Scripts"), python_dir])?.into()
     } else {
         python.parent().unwrap().to_path_buf()
     };
@@ -32,7 +32,7 @@ pub fn check_installed(package: &Path, python: &Path) -> Result<()> {
             .join("check_installed")
             .join("check_installed.py");
     }
-    let output = Command::new(&python)
+    let output = Command::new(python)
         .arg(check_installed)
         .env("PATH", path)
         .output()
@@ -92,13 +92,30 @@ pub fn handle_result<T>(result: Result<T>) -> T {
     }
 }
 
+/// Get Python implementation
+pub fn get_python_implementation(python_interp: &Path) -> Result<String> {
+    let code = "import sys; print(sys.implementation.name, end='')";
+    let output = Command::new(python_interp).arg("-c").arg(code).output()?;
+    let python_impl = String::from_utf8(output.stdout).unwrap();
+    Ok(python_impl)
+}
+
 /// Create virtualenv
 pub fn create_virtualenv(name: &str, python_interp: Option<PathBuf>) -> Result<(PathBuf, PathBuf)> {
+    let interp = python_interp.or_else(|| test_python_path().map(PathBuf::from));
+    let venv_interp = interp.clone().unwrap_or_else(|| {
+        let target = Target::from_target_triple(None).unwrap();
+        target.get_python()
+    });
+    let venv_name = match get_python_implementation(&venv_interp) {
+        Ok(python_impl) => format!("{}-{}", name, python_impl),
+        Err(_) => name.to_string(),
+    };
     let venv_dir = PathBuf::from("test-crates")
         .normalize()?
         .into_path_buf()
         .join("venvs")
-        .join(name);
+        .join(venv_name);
     let target = Target::from_target_triple(None)?;
 
     if venv_dir.is_dir() {
@@ -106,7 +123,6 @@ pub fn create_virtualenv(name: &str, python_interp: Option<PathBuf>) -> Result<(
     }
 
     let mut cmd = Command::new("virtualenv");
-    let interp = python_interp.or_else(|| env::var_os("MATURIN_TEST_PYTHON").map(|p| p.into()));
     if let Some(interp) = interp {
         cmd.arg("-p").arg(interp);
     }
@@ -162,4 +178,9 @@ pub fn create_conda_env(name: &str, major: usize, minor: usize) -> Result<(PathB
     let target = Target::from_target_triple(None)?;
     let python = target.get_venv_python(&result.prefix);
     Ok((result.prefix, python))
+}
+
+/// Path to the python interpreter for testing
+pub fn test_python_path() -> Option<String> {
+    env::var("MATURIN_TEST_PYTHON").ok()
 }

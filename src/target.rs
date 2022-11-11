@@ -119,6 +119,7 @@ fn get_supported_architectures(os: &Os) -> Vec<Arch> {
             Arch::Aarch64,
             Arch::Powerpc64,
             Arch::Powerpc64Le,
+            Arch::X86,
             Arch::X86_64,
         ],
         Os::OpenBsd => vec![Arch::X86, Arch::X86_64, Arch::Aarch64],
@@ -227,7 +228,8 @@ impl Target {
     ) -> Result<String> {
         let tag = match (&self.os, &self.arch) {
             // FreeBSD
-            (Os::FreeBsd, Arch::X86_64)
+            (Os::FreeBsd, Arch::X86)
+            | (Os::FreeBsd, Arch::X86_64)
             | (Os::FreeBsd, Arch::Aarch64)
             | (Os::FreeBsd, Arch::Powerpc64)
             | (Os::FreeBsd, Arch::Powerpc64Le)
@@ -272,8 +274,8 @@ impl Target {
             // Illumos
             (Os::Illumos, Arch::X86_64) => {
                 let info = PlatformInfo::new()?;
-                let mut release = info.release().replace('.', "_").replace('-', "_");
-                let mut arch = info.machine().replace(' ', "_").replace('/', "_");
+                let mut release = info.release().replace(['.', '-'], "_");
+                let mut arch = info.machine().replace([' ', '/'], "_");
 
                 let mut os = self.os.to_string().to_ascii_lowercase();
                 // See https://github.com/python/cpython/blob/46c8d915715aa2bd4d697482aa051fe974d440e1/Lib/sysconfig.py#L722-L730
@@ -353,7 +355,7 @@ impl Target {
                     Ok(os_ver) => os_ver,
                     Err(_) => emcc_version()?,
                 };
-                let release = release.replace('.', "_").replace('-', "_");
+                let release = release.replace(['.', '-'], "_");
                 format!("emscripten_{}_wasm32", release)
             }
             (Os::Wasi, Arch::Wasm32) => {
@@ -374,7 +376,7 @@ impl Target {
                 info.release().to_string()
             }
         };
-        let release = release.replace('.', "_").replace('-', "_");
+        let release = release.replace(['.', '-'], "_");
         Ok(release)
     }
 

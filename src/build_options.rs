@@ -270,11 +270,10 @@ impl BuildOptions {
                         let ext_suffix = sysconfig_data
                             .get("EXT_SUFFIX")
                             .context("syconfig didn't define an `EXT_SUFFIX` ಠ_ಠ")?;
-                        let abi_tag = sysconfig_data
-                            .get("SOABI")
-                            .and_then(|abi| abi.split('-').nth(1).map(ToString::to_string));
-                        let interpreter_kind = sysconfig_data
-                            .get("SOABI")
+                        let soabi = sysconfig_data.get("SOABI");
+                        let abi_tag =
+                            soabi.and_then(|abi| abi.split('-').nth(1).map(ToString::to_string));
+                        let interpreter_kind = soabi
                             .and_then(|tag| {
                                 if tag.starts_with("pypy") {
                                     Some(InterpreterKind::PyPy)
@@ -298,6 +297,8 @@ impl BuildOptions {
                             executable: PathBuf::new(),
                             platform: None,
                             runnable: false,
+                            implmentation_name: interpreter_kind.to_string().to_ascii_lowercase(),
+                            soabi: soabi.cloned(),
                         });
                     } else {
                         if interpreter.is_empty() && !self.find_interpreter {
@@ -376,6 +377,8 @@ impl BuildOptions {
                             executable: PathBuf::new(),
                             platform: None,
                             runnable: false,
+                            implmentation_name: "cpython".to_string(),
+                            soabi: None,
                         }])
                     } else if let Some(interp) = interpreters.get(0) {
                         println!("🐍 Using {} to generate to link bindings (With abi3, an interpreter is only required on windows)", interp);
@@ -396,6 +399,8 @@ impl BuildOptions {
                             executable: PathBuf::new(),
                             platform: None,
                             runnable: false,
+                            implmentation_name: "cpython".to_string(),
+                            soabi: None,
                         }])
                     } else {
                         bail!("Failed to find a python interpreter");
@@ -438,6 +443,8 @@ impl BuildOptions {
                             executable: PathBuf::new(),
                             platform: None,
                             runnable: false,
+                            implmentation_name: "cpython".to_string(),
+                            soabi: None,
                         }])
                     } else if target.cross_compiling() {
                         let mut interps = Vec::with_capacity(found_interpreters.len());
@@ -564,7 +571,14 @@ impl BuildOptions {
         } else {
             // User given list of interpreters
             let interpreter = if self.interpreter.is_empty() && !target.cross_compiling() {
-                vec![PathBuf::from("python3")]
+                if cfg!(test) {
+                    match env::var_os("MATURIN_TEST_PYTHON") {
+                        Some(python) => vec![python.into()],
+                        None => vec![PathBuf::from("python3")],
+                    }
+                } else {
+                    vec![PathBuf::from("python3")]
+                }
             } else {
                 self.interpreter.clone()
             };
@@ -906,7 +920,7 @@ pub fn find_bridge(cargo_metadata: &Metadata, bridge: Option<&str>) -> Result<Br
             let pyo3_node = deps[lib];
             if !pyo3_node.features.contains(&"extension-module".to_string()) {
                 let version = cargo_metadata[&pyo3_node.id].version.to_string();
-                println!(
+                eprintln!(
                     "⚠️  Warning: You're building a library without activating {}'s \
                      `extension-module` feature. \
                      See https://pyo3.rs/v{}/building_and_distribution.html#linking",
@@ -1349,7 +1363,7 @@ mod test {
             .exec()
             .unwrap();
         let metadata21 =
-            Metadata21::from_cargo_toml(&cargo_toml, &"test-crates/pyo3-pure", &cargo_metadata)
+            Metadata21::from_cargo_toml(&cargo_toml, "test-crates/pyo3-pure", &cargo_metadata)
                 .unwrap();
         assert_eq!(get_min_python_minor(&metadata21), None);
     }

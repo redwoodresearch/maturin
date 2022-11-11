@@ -1,5 +1,5 @@
 use crate::build_context::BridgeModel;
-use crate::target::RUST_1_64_0;
+use crate::target::{Arch, RUST_1_64_0};
 use crate::{BuildContext, PlatformTag, PythonInterpreter, Target};
 use anyhow::{anyhow, bail, Context, Result};
 use fat_macho::FatWriter;
@@ -350,7 +350,12 @@ fn compile_target(
                 || (matches!(bindings_crate, BridgeModel::BindingsAbi3(_, _))
                     && interpreter.interpreter_kind.is_pypy())
             {
-                build_command.env("PYO3_PYTHON", &interpreter.executable);
+                build_command
+                    .env("PYO3_PYTHON", &interpreter.executable)
+                    .env(
+                        "PYO3_ENVIRONMENT_SIGNATURE",
+                        interpreter.environment_signature(),
+                    );
             }
 
             // rust-cpython, and legacy pyo3 versions
@@ -384,6 +389,15 @@ fn compile_target(
         build_command.env("PYO3_CROSS_LIB_DIR", lib_dir);
     }
 
+    // Set default macOS deployment target version
+    if target.is_macos() && env::var_os("MACOSX_DEPLOYMENT_TARGET").is_none() {
+        let min_version = match target.target_arch() {
+            Arch::Aarch64 => "11.0",
+            _ => "10.7",
+        };
+        build_command.env("MACOSX_DEPLOYMENT_TARGET", min_version);
+    }
+
     let mut cargo_build = build_command
         .spawn()
         .context("Failed to run `cargo rustc`")?;
@@ -413,7 +427,7 @@ fn compile_target(
                             && !artifact.features.contains(&"rustc-dep-of-std".to_string());
                         if should_warn {
                             // This is a spurious error I don't really understand
-                            println!(
+                            eprintln!(
                                 "⚠️  Warning: The package {} wasn't listed in `cargo metadata`",
                                 package_id
                             );
@@ -485,7 +499,7 @@ fn compile_target(
 /// Currently the check is only run on linux, macOS and Windows
 pub fn warn_missing_py_init(artifact: &Path, module_name: &str) -> Result<()> {
     let py_init = format!("PyInit_{}", module_name);
-    let mut fd = File::open(&artifact)?;
+    let mut fd = File::open(artifact)?;
     let mut buffer = Vec::new();
     fd.read_to_end(&mut buffer)?;
     let mut found = false;
@@ -542,7 +556,7 @@ pub fn warn_missing_py_init(artifact: &Path, module_name: &str) -> Result<()> {
     }
 
     if !found {
-        println!(
+        eprintln!(
             "⚠️  Warning: Couldn't find the symbol `{}` in the native library. \
              Python will fail to import this module. \
              If you're using pyo3, check that `#[pymodule]` uses `{}` as module name",

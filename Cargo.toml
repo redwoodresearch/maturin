@@ -1,16 +1,16 @@
 [package]
 authors = ["konstin <konstin@mailbox.org>", "messense <messense@icloud.com>"]
 name = "maturin"
-version = "0.14.0-beta.2"
+version = "0.14.0-beta.7"
 description = "Build and publish crates with pyo3, rust-cpython and cffi bindings as well as rust binaries as python packages"
 exclude = ["test-crates/**/*", "sysconfig/*", "test-data/*", "ci/*", "tests/*", "guide/*", ".github/*"]
 homepage = "https://github.com/pyo3/maturin"
-readme = "Readme.md"
+readme = "README.md"
 repository = "https://github.com/pyo3/maturin"
 license = "MIT OR Apache-2.0"
 keywords = ["python", "cffi", "packaging", "pypi", "pyo3"]
 categories = ["api-bindings", "development-tools::ffi", "command-line-utilities"]
-edition = "2018"
+edition = "2021"
 rust-version = "1.61"
 
 [[bin]]
@@ -25,8 +25,8 @@ base64 = "0.13.0"
 glob = "0.3.0"
 cargo_metadata = "0.15.0"
 cargo-options = "0.5.2"
-cargo-zigbuild = "0.14.0"
-cargo-xwin = { version = "0.12.0", default-features = false }
+cargo-zigbuild = "0.14.1"
+cargo-xwin = { version = "0.12.2", default-features = false }
 cbindgen = { version = "0.24.2", default-features = false }
 flate2 = "1.0.18"
 goblin = "0.6.0"
@@ -53,9 +53,10 @@ pyproject-toml = "0.3.0"
 python-pkginfo = "0.5.5"
 textwrap = "0.16.0"
 ignore = "0.4.18"
+itertools = "0.10.5"
 dialoguer = { version = "0.10.2", default-features = false }
 console = "0.15.2"
-minijinja = "0.24.0"
+minijinja = "0.25.0"
 lddtree = "0.3.2"
 cc = "1.0.72"
 clap = { version = "4.0.0", features = ["derive", "env", "wrap_help"] }

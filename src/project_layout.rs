@@ -1,4 +1,5 @@
 use crate::build_options::{extract_cargo_metadata_args, CargoOptions};
+use crate::polyfill::MetadataCommandExt;
 use crate::{CargoToml, Metadata21, PyProjectToml};
 use anyhow::{bail, format_err, Context, Result};
 use cargo_metadata::{Metadata, MetadataCommand};
@@ -103,11 +104,11 @@ impl ProjectResolver {
         let cargo_metadata = Self::resolve_cargo_metadata(&manifest_file, &cargo_options)?;
 
         let mut metadata21 =
-            Metadata21::from_cargo_toml(&cargo_toml, &manifest_dir, &cargo_metadata)
+            Metadata21::from_cargo_toml(&cargo_toml, manifest_dir, &cargo_metadata)
                 .context("Failed to parse Cargo.toml into python metadata")?;
         if let Some(pyproject) = pyproject {
             let pyproject_dir = pyproject_file.parent().unwrap();
-            metadata21.merge_pyproject_toml(&pyproject_dir, pyproject)?;
+            metadata21.merge_pyproject_toml(pyproject_dir, pyproject)?;
         }
         let extra_metadata = cargo_toml.remaining_core_metadata();
 
@@ -196,7 +197,7 @@ impl ProjectResolver {
             let workspace_parent = workspace_root.parent().unwrap_or(&workspace_root);
             for parent in path.ancestors().skip(1) {
                 // Allow looking outside to the parent directory of Cargo workspace root
-                if !dunce::simplified(parent).starts_with(&workspace_parent) {
+                if !dunce::simplified(parent).starts_with(workspace_parent) {
                     break;
                 }
                 let pyproject_file = parent.join(PYPROJECT_TOML);
@@ -231,7 +232,7 @@ impl ProjectResolver {
                 // Detect src layout:
                 //
                 // my-project
-                // ├── Readme.md
+                // ├── README.md
                 // ├── pyproject.toml
                 // ├── src
                 // │   └── my_project
@@ -277,7 +278,7 @@ impl ProjectResolver {
         let result = MetadataCommand::new()
             .manifest_path(manifest_path)
             .other_options(cargo_metadata_extra_args)
-            .exec();
+            .exec_inherit_stderr();
 
         let cargo_metadata = match result {
             Ok(cargo_metadata) => cargo_metadata,

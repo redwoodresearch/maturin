@@ -6,7 +6,7 @@ use regex::Regex;
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::fmt;
-use std::io;
+use std::io::{self, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -96,35 +96,39 @@ fn find_all_windows(target: &Target, min_python_minor: usize) -> Result<Vec<Stri
 
     // If Python is installed from Python.org it should include the "python launcher"
     // which is used to find the installed interpreters
-    let execution = Command::new("py").arg("-0").output();
+    let execution = Command::new("cmd")
+        .arg("/c")
+        .arg("py")
+        .arg("--list-paths")
+        .output();
     if let Ok(output) = execution {
-        // x86_64: ' -3.10-64 *'
-        // arm64:  ' -V:3.11-arm64 * Python 3.11 (ARM64)
-        let expr = Regex::new(r" -(V:)?(\d).(\d+)-(arm)?(\d+)(?: .*)?").unwrap();
-        let lines = str::from_utf8(&output.stdout).unwrap().lines();
-        for line in lines {
+        // x86_64: ' -3.10-64 * C:\Users\xxx\AppData\Local\Programs\Python\Python310\python.exe'
+        // x86_64: ' -3.11 * C:\Users\xxx\AppData\Local\Programs\Python\Python310\python.exe'
+        // arm64:  ' -V:3.11-arm64 * C:\Users\xxx\AppData\Local\Programs\Python\Python311-arm64\python.exe
+        let expr = Regex::new(r" -(V:)?(\d).(\d+)-?(arm)?(\d*)\s*\*?\s*(.*)?").unwrap();
+        let stdout = str::from_utf8(&output.stdout).unwrap();
+        for line in stdout.lines() {
             if let Some(capture) = expr.captures(line) {
-                let context = "Expected a digit";
-
                 let major = capture
                     .get(2)
                     .unwrap()
                     .as_str()
                     .parse::<usize>()
-                    .context(context)?;
+                    .context("Expected a digit for major version")?;
                 let minor = capture
                     .get(3)
                     .unwrap()
                     .as_str()
                     .parse::<usize>()
-                    .context(context)?;
+                    .context("Expected a digit for minor version")?;
                 if !versions_found.contains(&(major, minor)) {
                     let pointer_width = capture
                         .get(5)
-                        .unwrap()
-                        .as_str()
+                        .map(|m| m.as_str())
+                        .filter(|m| !m.is_empty())
+                        .unwrap_or("64")
                         .parse::<usize>()
-                        .context(context)?;
+                        .context("Expected a digit for pointer width")?;
 
                     if windows_interpreter_no_build(
                         major,
@@ -136,10 +140,10 @@ fn find_all_windows(target: &Target, min_python_minor: usize) -> Result<Vec<Stri
                         continue;
                     }
 
+                    let executable = capture.get(6).unwrap().as_str();
                     let version = format!("-{}.{}-{}", major, minor, pointer_width);
-
-                    let output = Command::new("py")
-                        .args(&[&version, "-c", code])
+                    let output = Command::new(executable)
+                        .args(["-c", code])
                         .output()
                         .unwrap();
                     let path = str::from_utf8(&output.stdout).unwrap().trim();
@@ -227,7 +231,7 @@ fn find_all_windows(target: &Target, min_python_minor: usize) -> Result<Vec<Stri
 }
 
 fn windows_python_info(executable: &Path) -> Result<Option<InterpreterConfig>> {
-    let python_info = Command::new(&executable)
+    let python_info = Command::new(executable)
         .arg("-c")
         .arg("import sys; print(sys.version)")
         .output();
@@ -313,7 +317,8 @@ impl FromStr for InterpreterKind {
 
 /// The output format of [GET_INTERPRETER_METADATA]
 #[derive(Deserialize)]
-struct IntepreterMetadataMessage {
+struct InterpreterMetadataMessage {
+    implementation_name: String,
     executable: Option<String>,
     major: usize,
     minor: usize,
@@ -324,6 +329,7 @@ struct IntepreterMetadataMessage {
     platform: String,
     // comes from `platform.system()`
     system: String,
+    soabi: Option<String>,
     abi_tag: Option<String>,
 }
 
@@ -346,6 +352,10 @@ pub struct PythonInterpreter {
     /// When cross compile the target interpreter isn't runnable,
     /// and it's `executable` is empty
     pub runnable: bool,
+    /// Comes from `sys.platform.name`
+    pub implmentation_name: String,
+    /// Comes from sysconfig var `SOABI`
+    pub soabi: Option<String>,
 }
 
 impl Deref for PythonInterpreter {
@@ -363,7 +373,7 @@ impl Deref for PythonInterpreter {
 ///  - python 3 + Unix: Use ABIFLAGS
 ///  - python 3 + Windows: No ABIFLAGS, return an empty string
 fn fun_with_abiflags(
-    message: &IntepreterMetadataMessage,
+    message: &InterpreterMetadataMessage,
     target: &Target,
     bridge: &BridgeModel,
 ) -> Result<String> {
@@ -410,6 +420,18 @@ fn fun_with_abiflags(
 }
 
 impl PythonInterpreter {
+    /// Does this interpreter have PEP 384 stable api aka. abi3 support?
+    pub fn has_stable_api(&self) -> bool {
+        if self.implmentation_name.parse::<InterpreterKind>().is_err() {
+            false
+        } else {
+            match self.interpreter_kind {
+                InterpreterKind::CPython => true,
+                InterpreterKind::PyPy => false,
+            }
+        }
+    }
+
     /// Returns the supported python environment in the PEP 425 format used for the wheel filename:
     /// {python tag}-{abi tag}-{platform tag}
     ///
@@ -436,40 +458,57 @@ impl PythonInterpreter {
         } else {
             target.get_platform_tag(platform_tags, universal2)?
         };
-        let tag = match self.interpreter_kind {
-            InterpreterKind::CPython => {
-                if target.is_unix() {
+        let tag = if self.implmentation_name.parse::<InterpreterKind>().is_err() {
+            // Use generic tags when `sys.implementation.name` != `platform.python_implementation()`, for example Pyston
+            // See also https://github.com/pypa/packaging/blob/0031046f7fad649580bc3127d1cef9157da0dd79/packaging/tags.py#L234-L261
+            format!(
+                "{interpreter}{major}{minor}-{soabi}-{platform}",
+                interpreter = self.implmentation_name,
+                major = self.major,
+                minor = self.minor,
+                soabi = self
+                    .soabi
+                    .as_deref()
+                    .unwrap_or("none")
+                    .replace(['-', '.'], "_"),
+                platform = platform
+            )
+        } else {
+            match self.interpreter_kind {
+                InterpreterKind::CPython => {
+                    if target.is_unix() {
+                        format!(
+                            "cp{major}{minor}-cp{major}{minor}{abiflags}-{platform}",
+                            major = self.major,
+                            minor = self.minor,
+                            abiflags = self.abiflags,
+                            platform = platform
+                        )
+                    } else {
+                        // On windows the abiflags are missing, but this seems to work
+                        format!(
+                            "cp{major}{minor}-none-{platform}",
+                            major = self.major,
+                            minor = self.minor,
+                            platform = platform
+                        )
+                    }
+                }
+                InterpreterKind::PyPy => {
+                    // pypy uses its version as part of the ABI, e.g.
+                    // pypy 3.7 7.3 => numpy-1.20.1-pp37-pypy37_pp73-manylinux2014_x86_64.whl
                     format!(
-                        "cp{major}{minor}-cp{major}{minor}{abiflags}-{platform}",
+                        "pp{major}{minor}-pypy{major}{minor}_{abi_tag}-{platform}",
                         major = self.major,
                         minor = self.minor,
-                        abiflags = self.abiflags,
-                        platform = platform
-                    )
-                } else {
-                    // On windows the abiflags are missing, but this seems to work
-                    format!(
-                        "cp{major}{minor}-none-{platform}",
-                        major = self.major,
-                        minor = self.minor,
-                        platform = platform
+                        // TODO: Proper tag handling for pypy
+                        abi_tag = self
+                            .abi_tag
+                            .clone()
+                            .expect("PyPy's syconfig didn't define an `SOABI` ಠ_ಠ"),
+                        platform = platform,
                     )
                 }
-            }
-            InterpreterKind::PyPy => {
-                // pypy uses its version as part of the ABI, e.g.
-                // pypy 3.7 7.3 => numpy-1.20.1-pp37-pypy37_pp73-manylinux2014_x86_64.whl
-                format!(
-                    "pp{major}{minor}-pypy{major}{minor}_{abi_tag}-{platform}",
-                    major = self.major,
-                    minor = self.minor,
-                    // TODO: Proper tag handling for pypy
-                    abi_tag = self
-                        .abi_tag
-                        .clone()
-                        .expect("PyPy's syconfig didn't define an `SOABI` ಠ_ಠ"),
-                    platform = platform,
-                )
             }
         };
         Ok(tag)
@@ -507,8 +546,8 @@ impl PythonInterpreter {
         target: &Target,
         bridge: &BridgeModel,
     ) -> Result<Option<PythonInterpreter>> {
-        let output = Command::new(&executable.as_ref())
-            .args(&["-c", GET_INTERPRETER_METADATA])
+        let output = Command::new(executable.as_ref())
+            .args(["-c", GET_INTERPRETER_METADATA])
             .output();
 
         let err_msg = format!(
@@ -538,8 +577,7 @@ impl PythonInterpreter {
             }
             Err(err) => {
                 if err.kind() == io::ErrorKind::NotFound {
-                    #[cfg(windows)]
-                    {
+                    if cfg!(windows) {
                         if let Some(python) = executable.as_ref().to_str() {
                             let ver = if python.starts_with("python") {
                                 python.strip_prefix("python").unwrap_or(python)
@@ -547,10 +585,14 @@ impl PythonInterpreter {
                                 python
                             };
                             // Try py -x.y on Windows
-                            let output = Command::new("py")
+                            let mut metadata_py = tempfile::NamedTempFile::new()?;
+                            write!(metadata_py, "{}", GET_INTERPRETER_METADATA)?;
+                            let mut cmd = Command::new("cmd");
+                            cmd.arg("/c")
+                                .arg("py")
                                 .arg(format!("-{}-{}", ver, target.pointer_width()))
-                                .args(&["-c", GET_INTERPRETER_METADATA])
-                                .output();
+                                .arg(metadata_py.path());
+                            let output = cmd.output();
                             match output {
                                 Ok(output) if output.status.success() => output,
                                 _ => return Ok(None),
@@ -558,15 +600,15 @@ impl PythonInterpreter {
                         } else {
                             return Ok(None);
                         }
+                    } else {
+                        return Ok(None);
                     }
-                    #[cfg(not(windows))]
-                    return Ok(None);
                 } else {
                     return Err(err).context(err_msg);
                 }
             }
         };
-        let message: IntepreterMetadataMessage = serde_json::from_slice(&output.stdout)
+        let message: InterpreterMetadataMessage = serde_json::from_slice(&output.stdout)
             .context(err_msg)
             .context(String::from_utf8_lossy(&output.stdout).trim().to_string())?;
 
@@ -591,13 +633,7 @@ impl PythonInterpreter {
             // We don't use platform from sysconfig on macOS
             None
         } else {
-            Some(
-                message
-                    .platform
-                    .to_lowercase()
-                    .replace('-', "_")
-                    .replace('.', "_"),
-            )
+            Some(message.platform.to_lowercase().replace(['-', '.'], "_"))
         };
 
         Ok(Some(PythonInterpreter {
@@ -618,16 +654,21 @@ impl PythonInterpreter {
                 .unwrap_or_else(|| executable.as_ref().to_path_buf()),
             platform,
             runnable: true,
+            implmentation_name: message.implementation_name,
+            soabi: message.soabi,
         }))
     }
 
     /// Construct a `PythonInterpreter` from a sysconfig and target
     pub fn from_config(config: InterpreterConfig) -> Self {
+        let implmentation_name = config.interpreter_kind.to_string().to_ascii_lowercase();
         PythonInterpreter {
             config,
             executable: PathBuf::new(),
             platform: None,
             runnable: false,
+            implmentation_name,
+            soabi: None,
         }
     }
 
@@ -747,7 +788,6 @@ impl PythonInterpreter {
             .stderr(Stdio::inherit())
             .spawn()
             .and_then(|mut child| {
-                use std::io::Write;
                 child
                     .stdin
                     .as_mut()
@@ -785,7 +825,7 @@ impl PythonInterpreter {
             return true;
         }
         let out = Command::new(&self.executable)
-            .args(&[
+            .args([
                 "-m",
                 "pip",
                 "debug",
@@ -805,6 +845,16 @@ impl PythonInterpreter {
                 }
             }
         }
+    }
+
+    /// An opaque string that uniquely identifies this Python interpreter.
+    /// Used to trigger rebuilds for `pyo3` when the Python interpreter changes.
+    pub fn environment_signature(&self) -> String {
+        let pointer_width = self.pointer_width.unwrap_or(64);
+        format!(
+            "{}-{}.{}-{}bit",
+            self.implmentation_name, self.major, self.minor, pointer_width
+        )
     }
 }
 

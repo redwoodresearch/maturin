@@ -1,6 +1,12 @@
 //! To speed up the tests, they are tests all collected in a single module
 
-use common::{develop, editable, errors, handle_result, integration, other};
+use common::{
+    develop, editable, errors, get_python_implementation, handle_result, integration, other,
+    test_python_path,
+};
+use indoc::indoc;
+use maturin::Target;
+use std::path::{Path, PathBuf};
 
 mod common;
 
@@ -15,6 +21,7 @@ fn develop_pyo3_pure() {
 }
 
 #[test]
+#[ignore]
 fn develop_pyo3_pure_conda() {
     // Only run on GitHub Actions for now
     if std::env::var("GITHUB_ACTIONS").is_ok() {
@@ -33,6 +40,16 @@ fn develop_pyo3_mixed() {
         "test-crates/pyo3-mixed",
         None,
         "develop-pyo3-mixed",
+        false,
+    ));
+}
+
+#[test]
+fn develop_pyo3_mixed_include_exclude() {
+    handle_result(develop::test_develop(
+        "test-crates/pyo3-mixed-include-exclude",
+        None,
+        "develop-pyo3-mixed-include-exclude",
         false,
     ));
 }
@@ -145,6 +162,16 @@ fn editable_pyo3_ffi_pure() {
 
 #[test]
 fn integration_pyo3_bin() {
+    let python = test_python_path().map(PathBuf::from).unwrap_or_else(|| {
+        let target = Target::from_target_triple(None).unwrap();
+        target.get_python()
+    });
+    let python_implementation = get_python_implementation(&python).unwrap();
+    if python_implementation == "pypy" {
+        // PyPy doesn't support the 'auto-initialize' feature of pyo3
+        return;
+    }
+
     handle_result(integration::test_integration(
         "test-crates/pyo3-bin",
         None,
@@ -171,6 +198,17 @@ fn integration_pyo3_mixed() {
         "test-crates/pyo3-mixed",
         None,
         "integration-pyo3-mixed",
+        false,
+        None,
+    ));
+}
+
+#[test]
+fn integration_pyo3_mixed_include_exclude() {
+    handle_result(integration::test_integration(
+        "test-crates/pyo3-mixed-include-exclude",
+        None,
+        "integration-pyo3-mixed-include-exclude",
         false,
         None,
     ));
@@ -210,6 +248,7 @@ fn integration_pyo3_mixed_src_layout() {
 }
 
 #[test]
+#[cfg_attr(target_os = "macos", ignore)] // Don't run it on macOS, too slow
 fn integration_pyo3_pure_conda() {
     // Only run on GitHub Actions for now
     if std::env::var("GITHUB_ACTIONS").is_ok() {
@@ -301,10 +340,20 @@ fn integration_wasm_hello_world() {
         Some("wasm32-wasi"),
     ));
 
+    let python = test_python_path().map(PathBuf::from).unwrap_or_else(|| {
+        let target = Target::from_target_triple(None).unwrap();
+        target.get_python()
+    });
+    let python_implementation = get_python_implementation(&python).unwrap();
+    let venv_name = format!(
+        "integration-wasm-hello-world-py3-wasm32-wasi-{}",
+        python_implementation
+    );
+
     // Make sure we're actually running wasm
     assert!(Path::new("test-crates")
         .join("venvs")
-        .join("integration-wasm-hello-world-py3-wasm32-wasi")
+        .join(venv_name)
         .join(if cfg!(target_os = "windows") {
             "Scripts"
         } else {
@@ -320,9 +369,16 @@ fn abi3_without_version() {
 }
 
 #[test]
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg_attr(not(all(target_os = "linux", target_env = "gnu")), ignore)]
 fn pyo3_no_extension_module() {
-    handle_result(errors::pyo3_no_extension_module())
+    let python = test_python_path().map(PathBuf::from).unwrap_or_else(|| {
+        let target = Target::from_target_triple(None).unwrap();
+        target.get_python()
+    });
+    let python_implementation = get_python_implementation(&python).unwrap();
+    if python_implementation == "cpython" {
+        handle_result(errors::pyo3_no_extension_module())
+    }
 }
 
 #[test]
@@ -331,13 +387,13 @@ fn locked_doesnt_build_without_cargo_lock() {
 }
 
 #[test]
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg_attr(not(all(target_os = "linux", target_env = "gnu")), ignore)]
 fn invalid_manylinux_does_not_panic() {
     handle_result(errors::invalid_manylinux_does_not_panic())
 }
 
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg_attr(not(target_os = "linux"), ignore)]
 fn musl() {
     let ran = handle_result(other::test_musl());
     if !ran {
@@ -348,6 +404,46 @@ fn musl() {
 #[test]
 fn workspace_cargo_lock() {
     handle_result(other::test_workspace_cargo_lock())
+}
+
+#[test]
+fn workspace_members_non_local_dep_sdist() {
+    let cargo_toml = indoc!(
+        r#"
+        [package]
+        authors = ["konstin <konstin@mailbox.org>"]
+        name = "pyo3-pure"
+        version = "2.1.2"
+        edition = "2021"
+        description = "Implements a dummy function (get_fortytwo.DummyClass.get_42()) in rust"
+        license = "MIT"
+
+        [dependencies]
+        pyo3 = { version = "0.17.3", features = ["abi3-py37", "extension-module", "generate-import-lib"] }
+
+        [lib]
+        name = "pyo3_pure"
+        crate-type = ["cdylib"]
+        "#
+    );
+    handle_result(other::test_source_distribution(
+        "test-crates/pyo3-pure",
+        vec![
+            "pyo3_pure-0.1.0+abc123de/Cargo.lock",
+            "pyo3_pure-0.1.0+abc123de/Cargo.toml",
+            "pyo3_pure-0.1.0+abc123de/LICENSE",
+            "pyo3_pure-0.1.0+abc123de/PKG-INFO",
+            "pyo3_pure-0.1.0+abc123de/README.md",
+            "pyo3_pure-0.1.0+abc123de/check_installed/check_installed.py",
+            "pyo3_pure-0.1.0+abc123de/pyo3_pure.pyi",
+            "pyo3_pure-0.1.0+abc123de/pyproject.toml",
+            "pyo3_pure-0.1.0+abc123de/src/lib.rs",
+            "pyo3_pure-0.1.0+abc123de/tests/test_pyo3_pure.py",
+            "pyo3_pure-0.1.0+abc123de/tox.ini",
+        ],
+        Some((Path::new("pyo3_pure-0.1.0+abc123de/Cargo.toml"), cargo_toml)),
+        "sdist-workspace-members-non-local-dep",
+    ))
 }
 
 #[test]
@@ -365,6 +461,7 @@ fn lib_with_path_dep_sdist() {
             "sdist_with_path_dep-0.1.0/src/lib.rs",
             "sdist_with_path_dep-0.1.0/PKG-INFO",
         ],
+        None,
         "sdist-lib-with-path-dep",
     ))
 }
@@ -383,7 +480,53 @@ fn pyo3_mixed_src_layout_sdist() {
             "pyo3_mixed_src-2.1.3/rust/src/lib.rs",
             "pyo3_mixed_src-2.1.3/PKG-INFO",
         ],
+        None,
         "sdist-pyo3-mixed-src-layout",
+    ))
+}
+
+#[test]
+fn pyo3_mixed_include_exclude_sdist() {
+    handle_result(other::test_source_distribution(
+        "test-crates/pyo3-mixed-include-exclude",
+        vec![
+            // "pyo3_mixed_include_exclude-2.1.3/.gitignore", // excluded
+            "pyo3_mixed_include_exclude-2.1.3/Cargo.lock",
+            "pyo3_mixed_include_exclude-2.1.3/Cargo.toml",
+            "pyo3_mixed_include_exclude-2.1.3/PKG-INFO",
+            "pyo3_mixed_include_exclude-2.1.3/README.md",
+            "pyo3_mixed_include_exclude-2.1.3/check_installed/check_installed.py",
+            // "pyo3_mixed_include_exclude-2.1.3/pyo3_mixed_include_exclude/exclude_this_file, excluded
+            "pyo3_mixed_include_exclude-2.1.3/pyo3_mixed_include_exclude/__init__.py",
+            "pyo3_mixed_include_exclude-2.1.3/pyo3_mixed_include_exclude/include_this_file", // included
+            "pyo3_mixed_include_exclude-2.1.3/pyo3_mixed_include_exclude/python_module/__init__.py",
+            "pyo3_mixed_include_exclude-2.1.3/pyo3_mixed_include_exclude/python_module/double.py",
+            "pyo3_mixed_include_exclude-2.1.3/pyproject.toml",
+            "pyo3_mixed_include_exclude-2.1.3/src/lib.rs",
+            // "pyo3_mixed_include_exclude-2.1.3/tests/test_pyo3_mixed_include_exclude.py", excluded
+            "pyo3_mixed_include_exclude-2.1.3/tox.ini",
+        ],
+        None,
+        "sdist-pyo3-mixed-include-exclude",
+    ))
+}
+
+#[test]
+fn pyo3_mixed_include_exclude_wheel_files() {
+    handle_result(other::check_wheel_files(
+        "test-crates/pyo3-mixed-include-exclude",
+        vec![
+            "pyo3_mixed_include_exclude-2.1.3.dist-info/METADATA",
+            "pyo3_mixed_include_exclude-2.1.3.dist-info/RECORD",
+            "pyo3_mixed_include_exclude-2.1.3.dist-info/WHEEL",
+            "pyo3_mixed_include_exclude-2.1.3.dist-info/entry_points.txt",
+            "pyo3_mixed_include_exclude/__init__.py",
+            "pyo3_mixed_include_exclude/include_this_file",
+            "pyo3_mixed_include_exclude/python_module/__init__.py",
+            "pyo3_mixed_include_exclude/python_module/double.py",
+            "README.md",
+        ],
+        "wheel-files-pyo3-mixed-include-exclude",
     ))
 }
 
@@ -401,6 +544,7 @@ fn workspace_with_path_dep_sdist() {
             "workspace_with_path_dep-0.1.0/src/lib.rs",
             "workspace_with_path_dep-0.1.0/PKG-INFO",
         ],
+        None,
         "sdist-workspace-with-path-dep",
     ))
 }
@@ -418,6 +562,7 @@ fn workspace_inheritance_sdist() {
             "workspace_inheritance-0.1.0/src/lib.rs",
             "workspace_inheritance-0.1.0/PKG-INFO",
         ],
+        None,
         "sdist-workspace-inheritance",
     ))
 }

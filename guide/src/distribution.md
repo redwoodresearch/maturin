@@ -32,11 +32,11 @@ compatibility = "linux"
 
 `manylinux` option is also accepted as an alias of `compatibility` for backward compatibility with old version of maturin.
 
-To include arbitrary files in the sdist for use during compilation specify `sdist-include` as an array of globs:
+To include arbitrary files in the sdist for use during compilation specify `include` as an array of `path` globs with `format` set to `sdist`:
 
 ```toml
 [tool.maturin]
-sdist-include = ["path/**/*"]
+include = [{ path = "path/**/*", format = "sdist" }]
 ```
 
 ## Build Wheels
@@ -47,7 +47,7 @@ If you want to publish widely usable wheels for linux pypi, **you need to use a 
 
 The Rust compiler since version 1.64 [requires at least glibc 2.17](https://blog.rust-lang.org/2022/08/01/Increasing-glibc-kernel-requirements.html), so you need to use at least manylinux2014.
 For publishing, we recommend enforcing the same manylinux version as the image with the manylinux flag, e.g. use `--manylinux 2014` if you are building in `quay.io/pypa/manylinux2014_x86_64`.
-The [messense/maturin-action](https://github.com/messense/maturin-action) github action already takes care of this if you set e.g. `manylinux: 2014`.
+The [PyO3/maturin-action](https://github.com/PyO3/maturin-action) github action already takes care of this if you set e.g. `manylinux: 2014`.
 
 maturin contains a reimplementation of auditwheel automatically checks the generated library and gives the wheel the proper platform tag.
 
@@ -202,7 +202,7 @@ other kind of bindings may work but aren't tested regularly.
 ##### Use Docker
 
 For manylinux support the [manylinux-cross](https://github.com/messense/manylinux-cross) docker images can be used.
-And [maturin-action](https://github.com/messense/maturin-action) makes it easy to do cross compilation on GitHub Actions.
+And [maturin-action](https://github.com/PyO3/maturin-action) makes it easy to do cross compilation on GitHub Actions.
 
 ##### Use Zig
 
@@ -224,7 +224,7 @@ or providing any Windows Python library files.
 
 ```toml
 [dependencies]
-pyo3 = { version = "0.17.2", features = ["extension-module", "generate-import-lib"] }
+pyo3 = { version = "0.17.3", features = ["extension-module", "generate-import-lib"] }
 ```
 
 It uses an external [`python3-dll-a`](https://docs.rs/python3-dll-a/latest/python3_dll_a/) crate to 

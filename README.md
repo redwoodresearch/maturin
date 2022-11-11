@@ -4,6 +4,7 @@ _formerly pyo3-pack_
 
 [![Actions Status](https://img.shields.io/github/workflow/status/pyo3/maturin/Test?logo=github&style=flat-square)](https://github.com/PyO3/maturin/actions)
 [![FreeBSD](https://img.shields.io/cirrus/github/PyO3/maturin/main?logo=CircleCI&style=flat-square)](https://cirrus-ci.com/github/PyO3/maturin)
+[![Bors enabled](https://bors.tech/images/badge_small.svg)](https://app.bors.tech/repositories/55651)
 [![Crates.io](https://img.shields.io/crates/v/maturin.svg?logo=rust&style=flat-square)](https://crates.io/crates/maturin)
 [![PyPI](https://img.shields.io/pypi/v/maturin.svg?logo=python&style=flat-square)](https://pypi.org/project/maturin)
 [![Maturin User Guide](https://img.shields.io/badge/user-guide-brightgreen?logo=readthedocs&style=flat-square)](https://maturin.rs)
@@ -51,7 +52,7 @@ which requires the right compilers to be installed. Installing a wheel is much f
 
 When you publish a package to be installable with `pip install`, you upload it to [pypi](https://pypi.org/), the official package repository.
 For testing, you can use [test pypi](https://test.pypi.org/) instead, which you can use with `pip install --index-url https://test.pypi.org/simple/`.
-Note that for publishing for linux, [you need to use the manylinux docker container](#manylinux-and-auditwheel), while for publishing from your repository you can use the [messense/maturin-action github action](https://github.com/messense/maturin-action).
+Note that for publishing for linux, [you need to use the manylinux docker container](#manylinux-and-auditwheel), while for publishing from your repository you can use the [PyO3/maturin-action github action](https://github.com/PyO3/maturin-action).
 
 ## pyo3 and rust-cpython
 
@@ -103,7 +104,7 @@ my-project
 │   ├── __init__.py
 │   └── bar.py
 ├── pyproject.toml
-├── Readme.md
+├── README.md
 └── src
     └── lib.rs
 ```
@@ -135,7 +136,7 @@ my-project
 │       ├── __init__.py
 │       └── bar.py
 ├── pyproject.toml
-├── Readme.md
+├── README.md
 └── src
     └── lib.rs
 ```
@@ -156,7 +157,7 @@ my-project
 │   ├── __init__.py
 │   ├── bar.py
 │   └── my_project.cpython-36m-x86_64-linux-gnu.so
-├── Readme.md
+├── README.md
 └── src
     └── lib.rs
 ```
@@ -222,11 +223,11 @@ compatibility = "linux"
 
 `manylinux` option is also accepted as an alias of `compatibility` for backward compatibility with old version of maturin.
 
-To include arbitrary files in the sdist for use during compilation specify `sdist-include` as an array of globs:
+To include arbitrary files in the sdist for use during compilation specify `include` as an array of `path` globs with `format` set to `sdist`:
 
 ```toml
 [tool.maturin]
-sdist-include = ["path/**/*"]
+include = [{ path = "path/**/*", format = "sdist" }]
 ```
 
 There's a `maturin sdist` command for only building a source distribution as workaround for [pypa/pip#6041](https://github.com/pypa/pip/issues/6041).
@@ -239,7 +240,7 @@ If you want to publish widely usable wheels for linux pypi, **you need to use a 
 
 The Rust compiler since version 1.64 [requires at least glibc 2.17](https://blog.rust-lang.org/2022/08/01/Increasing-glibc-kernel-requirements.html), so you need to use at least manylinux2014.
 For publishing, we recommend enforcing the same manylinux version as the image with the manylinux flag, e.g. use `--manylinux 2014` if you are building in `quay.io/pypa/manylinux2014_x86_64`.
-The [messense/maturin-action](https://github.com/messense/maturin-action) github action already takes care of this if you set e.g. `manylinux: 2014`.
+The [PyO3/maturin-action](https://github.com/PyO3/maturin-action) github action already takes care of this if you set e.g. `manylinux: 2014`.
 
 maturin contains a reimplementation of auditwheel automatically checks the generated library and gives the wheel the proper.
 If your system's glibc is too new or you link other shared libraries, it will assign the `linux` tag.

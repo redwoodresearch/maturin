@@ -92,6 +92,7 @@ pub fn find_versioned_libraries(elf: &Elf) -> Vec<VersionedLibrary> {
 }
 
 /// Find incompliant symbols from symbol versions
+#[allow(clippy::result_large_err)]
 fn find_incompliant_symbols(
     elf: &Elf,
     symbol_versions: &[String],
@@ -111,6 +112,7 @@ fn find_incompliant_symbols(
     Ok(symbols)
 }
 
+#[allow(clippy::result_large_err)]
 fn policy_is_satisfied(
     policy: &Policy,
     elf: &Elf,
@@ -212,7 +214,7 @@ fn policy_is_satisfied(
         ));
     }
     // Check for libpython and forbidden libraries
-    let is_libpython = Regex::new(r"^libpython3\.\d+\.so\.\d+\.\d+$").unwrap();
+    let is_libpython = Regex::new(r"^libpython3\.\d+m?u?\.so\.\d+\.\d+$").unwrap();
     let offenders: Vec<String> = offending_libs.into_iter().collect();
     match offenders.as_slice() {
         [] => Ok(()),
@@ -253,6 +255,7 @@ fn get_default_platform_policies() -> Vec<Policy> {
 /// a higher version would be possible.
 ///
 /// Does nothing for `platform_tag` set to `Off`/`Linux` or non-linux platforms.
+#[allow(clippy::result_large_err)]
 pub fn auditwheel_rs(
     artifact: &BuildArtifact,
     target: &Target,
@@ -350,7 +353,7 @@ pub fn auditwheel_rs(
     } else if let Some(policy) = highest_policy {
         Ok(policy)
     } else {
-        println!(
+        eprintln!(
             "⚠️  Warning: No compatible platform tag found, using the linux tag instead. \
             You won't be able to upload those wheels to PyPI."
         );

@@ -3,8 +3,18 @@ name: Test
 on:
   push:
     branches:
-      - main
+      # for bors r+
+      - staging
+      # for bors try
+      - trying
   pull_request:
+    paths-ignore:
+      - 'guide/**'
+      - 'sysconfig/**'
+      - '**.md'
+      - '.cirrus.yml'
+      - '.github/ISSUE_TEMPLATE/**'
+      - '.github/dependabot.yml'
   workflow_dispatch:
 
 concurrency:
@@ -12,12 +22,97 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  generate-matrix:
+    name: Generate Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.generate-matrix.outputs.os }}
+      python-version: ${{ steps.generate-matrix.outputs.python-version }}
+      fail-fast: ${{ steps.generate-matrix.outputs.fail-fast }}
+    steps:
+      - uses: actions/setup-node@v3
+        with:
+          node-version: 16
+      - run: npm install js-yaml
+      - name: Generate matrix
+        id: generate-matrix
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const yaml = require('js-yaml')
+            const OS = yaml.load(process.env.OS_MATRIX)
+            const PYTHON_VERSIONS = yaml.load(process.env.PYTHON_VERSION)
+
+            if (context.eventName == 'workflow_dispatch') {
+              // Run all of them on workflow dispatch
+              core.setOutput('os', OS)
+              core.setOutput('python-version', PYTHON_VERSIONS)
+              core.setOutput('fail-fast', 'false')
+            } else if (context.eventName == 'push') {
+              const commitMessage = process.env.COMMIT_MESSAGE.trim()
+              const matches = commitMessage.match(/(Try|Merge) #([0-9]+):/)
+              if (matches) {
+                const prNumber = matches[2]
+                const { data: { labels: labels } } = await github.rest.pulls.get({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  pull_number: prNumber
+                })
+                const labelNames = labels.map(label => label.name)
+                if (labelNames.includes('CI-no-fail-fast')) {
+                  core.setOutput('fail-fast', 'false')
+                }
+              }
+              core.setOutput('os', OS)
+              core.setOutput('python-version', PYTHON_VERSIONS)
+            } else if (context.eventName == 'pull_request') {
+              const { data: { labels: labels } } = await github.rest.pulls.get({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.pull_request.number
+              })
+              const labelNames = labels.map(label => label.name)
+              if (labelNames.includes('CI-no-fail-fast')) {
+                core.setOutput('fail-fast', 'false')
+              }
+              // Only run latest CPython and PyPy tests on pull requests
+              const firstPyPy = PYTHON_VERSIONS.findIndex(version => version.startsWith('pypy'))
+              const pythonVersions = [PYTHON_VERSIONS[firstPyPy - 1], PYTHON_VERSIONS[PYTHON_VERSIONS.length - 1]]
+              core.setOutput('python-version', pythonVersions)
+
+              // Skip macOS tests on pull requests, it's slow and already partially covered by Cirrus CI
+              core.setOutput('os', OS.filter(os => !os.startsWith('macos')))
+            }
+    env:
+      COMMIT_MESSAGE: >
+        ${{
+            ((
+              (startsWith(github.event.head_commit.message, 'Try #') || startsWith(github.event.head_commit.message, 'Merge #')) &&
+              github.event.head_commit.author.username == 'bors[bot]'
+            ) && github.event.head_commit.message) || ''
+          }}
+      OS_MATRIX: |
+        - ubuntu-latest
+        - macos-latest
+        - windows-latest
+      PYTHON_VERSION: |
+        - '3.7'
+        - '3.8'
+        - '3.9'
+        - '3.10'
+        - '3.11'
+        - 'pypy3.7'
+        - 'pypy3.8'
+        - 'pypy3.9'
+
   test:
     name: Test
+    needs: [ generate-matrix ]
     strategy:
-      fail-fast: ${{ !contains(github.event.pull_request.labels.*.name, 'CI-no-fail-fast') }}
+      fail-fast: ${{ needs.generate-matrix.outputs.fail-fast != 'false' }}
       matrix:
-        os: [ ubuntu-latest, macos-latest, windows-latest ]
+        os: ${{ fromJson(needs.generate-matrix.outputs.os) }}
+        python-version: ${{ fromJson(needs.generate-matrix.outputs.python-version) }}
     runs-on: ${{ matrix.os }}
     env:
       RUST_BACKTRACE: '1'
@@ -29,25 +124,17 @@ jobs:
           activate-environment: ''
       - uses: actions/setup-python@v4
         with:
-          python-version: "3.7"
-      - uses: actions/setup-python@v4
-        with:
-          python-version: "3.8"
-      - uses: actions/setup-python@v4
-        with:
-          python-version: "3.9"
-      - uses: actions/setup-python@v4
-        with:
-          python-version: "3.10.0"
-      - name: Install cffi and virtualenv
-        run: pip install cffi virtualenv ziglang~=0.9.0 twine
-      - uses: actions-rs/toolchain@v1
+          python-version: ${{ matrix.python-version }}
+          architecture: 'x64'
+      - name: Install cffi
+        if: ${{ !contains(matrix.python-version, 'pypy') }}
+        run: pip install cffi
+      - name: Install python packages
+        run: pip install virtualenv ziglang~=0.10.0 twine
+      - uses: dtolnay/rust-toolchain@stable
         id: rustup
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
-          target: wasm32-wasi # Additional target
+          targets: wasm32-wasi  # Additional target
       - name: Install cargo-nextest
         uses: taiki-e/install-action@nextest
       - name: Install aarch64-apple-darwin Rust target
@@ -76,41 +163,20 @@ jobs:
           brew install gnu-tar
           echo "/usr/local/opt/gnu-tar/libexec/gnubin" >> $GITHUB_PATH
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v1
+        uses: Swatinem/rust-cache@v2
         with:
-          key: maturin-${{ runner.os }}
+          shared-key: maturin-build
       - name: Cache test crates cargo build
-        uses: actions/cache@v2
+        uses: actions/cache@v3
         with:
           path: test-crates/targets
-          key: test-crates-${{ runner.os }}-${{ steps.rustup.outputs.rustc_hash }}-${{ hashFiles('test-crates/*/Cargo.lock') }}
-
+          key: test-crates-${{ runner.os }}-${{ steps.rustup.outputs.cachekey }}-${{ matrix.python-version }}-${{ hashFiles('test-crates/*/Cargo.lock') }}
+      - name: Set MATURIN_TEST_PYTHON for PyPy
+        shell: bash
+        if: contains(matrix.python-version, 'pypy')
+        run: echo "MATURIN_TEST_PYTHON=pypy3" >> $GITHUB_ENV
       - name: cargo test
         run: cargo nextest run --features password-storage
-      - uses: actions/setup-python@v4
-        with:
-          python-version: "pypy-3.7"
-      - name: test build pypy wheel
-        shell: bash
-        run: |
-          set -ex
-          cargo run -- build -i pypy3 -m test-crates/pyo3-mixed-submodule/Cargo.toml
-          pypy3 -m pip install --force-reinstall --no-index --find-links test-crates/pyo3-mixed-submodule/target/wheels pyo3-mixed-submodule
-          pypy3 -m pip install pytest
-          pypy3 -m pytest test-crates/pyo3-mixed-submodule/tests/
-      - name: test build pypy wheel with abi3
-        shell: bash
-        run: |
-          set -ex
-          cargo run -- build -i pypy3 -m test-crates/pyo3-pure/Cargo.toml -vv
-          pypy3 -m pip install --force-reinstall --no-index --find-links test-crates/pyo3-pure/target/wheels pyo3-pure
-          pypy3 -m pip install pytest
-          pypy3 -m pytest test-crates/pyo3-pure/tests
-
-          cargo run -- pep517 build-wheel -i pypy3 -m test-crates/pyo3-pure/Cargo.toml -vv
-      - uses: actions/setup-python@v4
-        with:
-          python-version: "3.10.0"
       - name: test cross compiling with zig
         shell: bash
         run: |
@@ -120,19 +186,23 @@ jobs:
           rustup target add aarch64-apple-darwin
 
           # abi3
-          cargo run -- build -i python -m test-crates/pyo3-pure/Cargo.toml --target aarch64-unknown-linux-gnu --zig
-          cargo run -- build -i python -m test-crates/pyo3-pure/Cargo.toml --target aarch64-unknown-linux-musl --zig
-          cargo run -- build -i python -m test-crates/pyo3-pure/Cargo.toml --target aarch64-apple-darwin --zig
+          cargo run -- build -i ${{ matrix.python-version }} -m test-crates/pyo3-pure/Cargo.toml --target aarch64-unknown-linux-gnu --zig
+          cargo run -- build -i ${{ matrix.python-version }} -m test-crates/pyo3-pure/Cargo.toml --target aarch64-unknown-linux-musl --zig
+          if [[ "${{ matrix.python-version }}" != "pypy"* ]]; then
+            cargo run -- build -i ${{ matrix.python-version }} -m test-crates/pyo3-pure/Cargo.toml --target aarch64-apple-darwin --zig
+          fi
           # Check wheels with twine
           twine check --strict test-crates/pyo3-pure/target/wheels/*.whl
 
           # non-abi3
-          cargo run -- build -i python3.9 -m test-crates/pyo3-mixed/Cargo.toml --target aarch64-unknown-linux-gnu --zig
-          cargo run -- build -i python3.9 -m test-crates/pyo3-mixed/Cargo.toml --target aarch64-apple-darwin --zig
+          cargo run -- build -i ${{ matrix.python-version }} -m test-crates/pyo3-mixed/Cargo.toml --target aarch64-unknown-linux-gnu --zig
+          if [[ "${{ matrix.python-version }}" != "pypy"* ]]; then
+            cargo run -- build -i ${{ matrix.python-version }} -m test-crates/pyo3-mixed/Cargo.toml --target aarch64-apple-darwin --zig
+          fi
           # Check wheels with twine
           twine check --strict test-crates/pyo3-mixed/target/wheels/*.whl
       - name: test cross compiling windows wheel
-        if: matrix.os == 'ubuntu-latest'
+        if: ${{ matrix.os == 'ubuntu-latest' && !contains(matrix.python-version, 'pypy') }}
         run: |
           set -ex
           sudo apt-get install -y mingw-w64
@@ -145,7 +215,7 @@ jobs:
           cargo run -- build -m test-crates/pyo3-pure/Cargo.toml --target x86_64-pc-windows-msvc
 
           # no-abi3
-          cargo run -- build -i python3.9 -m test-crates/pyo3-mixed/Cargo.toml --target x86_64-pc-windows-msvc
+          cargo run -- build -i python${{ matrix.python-version }} -m test-crates/pyo3-mixed/Cargo.toml --target x86_64-pc-windows-msvc
       - name: test compiling with PYO3_CONFIG_FILE
         shell: bash
         run: |
@@ -164,6 +234,7 @@ jobs:
 
   test-emscripten:
     name: Test Emscripten
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     env:
       PYODIDE_VERSION: '0.21.3'
@@ -171,21 +242,20 @@ jobs:
       NODE_VERSION: 18
     steps:
       - uses: actions/checkout@v3
-      - uses: actions/setup-python@v2
+      - uses: actions/setup-python@v4
         id: setup-python
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - uses: actions/setup-node@v3
         with:
           node-version: ${{ env.NODE_VERSION }}
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@nightly
         with:
-          profile: minimal
-          toolchain: nightly
           components: rust-src
-          target: wasm32-unknown-emscripten
-          override: true
-      - uses: Swatinem/rust-cache@v1
+          targets: wasm32-unknown-emscripten
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: maturin-build
       - run: pip install nox
       - name: Setup Pyodide
         run: nox -s setup-pyodide
@@ -201,6 +271,7 @@ jobs:
 
   test-alpine:
     name: Test Alpine Linux
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     env:
       RUST_BACKTRACE: '1'
@@ -213,11 +284,11 @@ jobs:
           apk add cargo python3-dev libffi-dev py3-pip curl bash tar zstd
           pip3 install cffi virtualenv
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v1
+        uses: Swatinem/rust-cache@v2
         with:
-          key: maturin-${{ runner.os }}-alpine
+          shared-key: maturin-build
       - name: Cache test crates cargo build
-        uses: actions/cache@v2
+        uses: actions/cache@v3
         with:
           path: test-crates/targets
           key: test-crates-${{ runner.os }}-alpine-${{ hashFiles('test-crates/*/Cargo.lock') }}
@@ -230,34 +301,31 @@ jobs:
 
   test-auditwheel:
     name: Test Auditwheel
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: ${{ !contains(github.event.pull_request.labels.*.name, 'CI-no-fail-fast') }}
       matrix:
         # manylinux2014 fails with `/lib64/libc.so.6: version `GLIBC_2.18'` not found recently
-        # could be a upstream Rust issue, disable it for now
+        # could be an upstream Rust issue, disable it for now
         #
         # manylinux: [ 'manylinux2014', 'manylinux_2_24' ]
         manylinux: [ 'manylinux_2_24' ]
     container: quay.io/pypa/${{ matrix.manylinux }}_x86_64
     steps:
       - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         id: rustup
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
       # Caching
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v1
+        uses: Swatinem/rust-cache@v2
         with:
-          key: maturin-${{ runner.os }}
+          shared-key: maturin-build
       - name: Cache test crates cargo build
-        uses: actions/cache@v2
+        uses: actions/cache@v3
         with:
-          path: test-crates/*/target
-          key: auditwheel-test-crates-${{ runner.os }}-${{ steps.rustup.outputs.rustc_hash }}-${{ hashFiles('test-crates/*/Cargo.lock') }}
+          path: test-crates/targets
+          key: test-crates-${{ runner.os }}-${{ steps.rustup.outputs.cachekey }}-auditwheel-${{ hashFiles('test-crates/*/Cargo.lock') }}
       - name: Compliant Build
         run: tests/manylinux_compliant.sh ${{ matrix.manylinux }}
       - name: Incompliant Build
@@ -266,16 +334,16 @@ jobs:
 
   test-docker:
     name: Test Docker
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-python@v4
         with:
-          python-version: "3.8"
+          python-version: "3.11"
       - uses: docker/setup-buildx-action@v2
       - name: Build
-        uses: docker/build-push-action@v2
+        uses: docker/build-push-action@v3
         with:
           context: .
           push: false
@@ -284,11 +352,11 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Cache test crates cargo build
-        uses: actions/cache@v2
+        uses: actions/cache@v3
         with:
           path: test-crates/*/target
           # Dockerfile contains the rustc version
-          key: docker-test-crates-${{ hashFiles('Dockerfile', 'test-crates/*/Cargo.lock') }}
+          key: test-crates-docker-${{ hashFiles('Dockerfile', 'test-crates/*/Cargo.lock') }}
       - name: Test the Docker container
         run: ./test-dockerfile.sh
       # Fix permissions from docker for caching
@@ -296,6 +364,7 @@ jobs:
 
   test-cross-compile:
     name: Test Cross Compile
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     container: ${{ matrix.platform.container }}
     strategy:
@@ -326,13 +395,9 @@ jobs:
             container: ghcr.io/messense/manylinux2014-cross:aarch64
     steps:
       - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
-        id: rustup
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
-          target: ${{ matrix.platform.target }}
+          targets: ${{ matrix.platform.target }}
       - name: Build wheels
         run: |
           set -ex
@@ -349,6 +414,7 @@ jobs:
 
   test-bootstrap:
     name: Test Bootstrap
+    if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: ${{ !contains(github.event.pull_request.labels.*.name, 'CI-no-fail-fast') }}
@@ -366,18 +432,14 @@ jobs:
               - 'setup.py'
               - 'MANIFEST.in'
               - '.github/workflows/test.yml'
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         if: steps.changes.outputs.changed == 'true'
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
       # Caching
       - name: Cache cargo build
         if: steps.changes.outputs.changed == 'true'
-        uses: Swatinem/rust-cache@v1
+        uses: Swatinem/rust-cache@v2
         with:
-          key: maturin-${{ runner.os }}-bootstrap
+          shared-key: maturin-build
       - uses: actions/setup-python@v4
         if: steps.changes.outputs.changed == 'true'
         with:
@@ -406,21 +468,48 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: '1.61.0'
-          override: true
+      - uses: dtolnay/rust-toolchain@1.61.0
       # Caching
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v1
-        with:
-          key: maturin-${{ runner.os }}-msrv
+        uses: Swatinem/rust-cache@v2
       - name: cargo build
         run: cargo build --all
 
+  test-pyston:
+    name: Test Pyston
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    container: pyston/pyston:2.3.5
+    steps:
+      - uses: actions/checkout@v3
+      - uses: dtolnay/rust-toolchain@stable
+        id: rustup
+        with:
+          targets: wasm32-wasi
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+      - name: Install python packages
+        run: pip install virtualenv cffi
+      # Caching
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: maturin-build
+      - name: Cache test crates cargo build
+        uses: actions/cache@v3
+        with:
+          path: test-crates/targets
+          key: test-crates-${{ runner.os }}-${{ steps.rustup.outputs.cachekey }}-pyston-${{ hashFiles('test-crates/*/Cargo.lock') }}
+      - name: cargo test
+        env:
+          MATURIN_TEST_PYTHON: pyston
+        run: |
+          # unset GITHUB_ACTIONS env var to disable zig and conda related tests
+          env -u GITHUB_ACTIONS cargo nextest run --features password-storage
+
   check:
     name: Check ${{ matrix.platform.target }}
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: ${{ !contains(github.event.pull_request.labels.*.name, 'CI-no-fail-fast') }}
       matrix:
@@ -434,13 +523,33 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ${{ matrix.platform.apt-packages }}
-      - uses: actions-rs/toolchain@v1
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: stable
-          target: ${{ matrix.platform.target }}
-          override: true
+          targets: ${{ matrix.platform.target }}
       - name: Cache cargo build
-        uses: Swatinem/rust-cache@v1
+        uses: Swatinem/rust-cache@v2
       - name: cargo check
         run: cargo check --target ${{ matrix.platform.target }}
+
+  conclusion:
+    needs:
+      - test
+      - test-emscripten
+      - test-alpine
+      - test-auditwheel
+      - test-docker
+      - test-cross-compile
+      - test-bootstrap
+      - test-msrv
+      - test-pyston
+      - check
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Result
+        run: |
+          jq -C <<< "${needs}"
+          # Check if all needs were successful or skipped.
+          "$(jq -r 'all(.result as $result | (["success", "skipped"] | contains([$result])))' <<< "${needs}")"
+        env:
+          needs: ${{ toJson(needs) }}

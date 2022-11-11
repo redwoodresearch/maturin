@@ -1,29 +1,30 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use flate2::read::GzDecoder;
-use maturin::{BuildOptions, CargoOptions};
+use maturin::{BuildOptions, CargoOptions, PlatformTag};
 use pretty_assertions::assert_eq;
 use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::Read;
 use std::iter::FromIterator;
 use std::path::{Path, PathBuf};
 use tar::Archive;
+use zip::ZipArchive;
 
 /// Tries to compile a sample crate (pyo3-pure) for musl,
 /// given that rustup and the the musl target are installed
 ///
 /// The bool in the Ok() response says whether the test was actually run
-#[cfg(target_os = "linux")]
 pub fn test_musl() -> Result<bool> {
     use anyhow::bail;
     use fs_err as fs;
     use fs_err::File;
     use goblin::elf::Elf;
     use std::io::ErrorKind;
-    use std::io::Read;
     use std::process::Command;
 
     let get_target_list = Command::new("rustup")
-        .args(&["target", "list", "--installed"])
+        .args(["target", "list", "--installed"])
         .output();
 
     match get_target_list {
@@ -48,7 +49,7 @@ pub fn test_musl() -> Result<bool> {
     };
 
     // The first arg gets ignored
-    let options: BuildOptions = BuildOptions::try_parse_from(&[
+    let options: BuildOptions = BuildOptions::try_parse_from([
         "build",
         "--manifest-path",
         "test-crates/hello-world/Cargo.toml",
@@ -91,7 +92,7 @@ pub fn test_musl() -> Result<bool> {
 /// https://github.com/PyO3/maturin/issues/449
 pub fn test_workspace_cargo_lock() -> Result<()> {
     // The first arg gets ignored
-    let options: BuildOptions = BuildOptions::try_parse_from(&[
+    let options: BuildOptions = BuildOptions::try_parse_from([
         "build",
         "--manifest-path",
         "test-crates/workspace/py/Cargo.toml",
@@ -114,6 +115,7 @@ pub fn test_workspace_cargo_lock() -> Result<()> {
 pub fn test_source_distribution(
     package: impl AsRef<Path>,
     expected_files: Vec<&str>,
+    expected_cargo_toml: Option<(&Path, &str)>,
     unique_name: &str,
 ) -> Result<()> {
     let manifest_path = package.as_ref().join("Cargo.toml");
@@ -142,16 +144,74 @@ pub fn test_source_distribution(
     let mut archive = Archive::new(tar);
     let mut files = BTreeSet::new();
     let mut file_count = 0;
+    let mut cargo_toml = None;
     for entry in archive.entries()? {
-        let entry = entry?;
+        let mut entry = entry?;
         files.insert(format!("{}", entry.path()?.display()));
         file_count += 1;
+        if let Some(cargo_toml_path) = expected_cargo_toml.as_ref().map(|(p, _)| *p) {
+            if entry.path()? == cargo_toml_path {
+                let mut contents = String::new();
+                entry.read_to_string(&mut contents)?;
+                cargo_toml = Some(contents);
+            }
+        }
     }
     assert_eq!(
         files,
         BTreeSet::from_iter(expected_files.into_iter().map(ToString::to_string))
     );
     assert_eq!(file_count, files.len(), "duplicated files found in sdist");
+
+    if let Some((cargo_toml_path, expected)) = expected_cargo_toml {
+        let cargo_toml = cargo_toml
+            .with_context(|| format!("{} not found in sdist", cargo_toml_path.display()))?;
+        assert_eq!(cargo_toml, expected);
+    }
+    Ok(())
+}
+
+pub fn check_wheel_files(
+    package: impl AsRef<Path>,
+    expected_files: Vec<&str>,
+    unique_name: &str,
+) -> Result<()> {
+    let manifest_path = package.as_ref().join("Cargo.toml");
+    let wheel_directory = Path::new("test-crates").join("wheels").join(unique_name);
+
+    let build_options = BuildOptions {
+        out: Some(wheel_directory),
+        cargo: CargoOptions {
+            manifest_path: Some(manifest_path),
+            quiet: true,
+            target_dir: Some(PathBuf::from(format!(
+                "test-crates/targets/{}",
+                unique_name
+            ))),
+            ..Default::default()
+        },
+        platform_tag: vec![PlatformTag::Linux],
+        ..Default::default()
+    };
+
+    let build_context = build_options.into_build_context(false, false, false)?;
+    let wheels = build_context
+        .build_wheels()
+        .context("Failed to build wheels")?;
+    assert!(!wheels.is_empty());
+    let (wheel_path, _) = &wheels[0];
+
+    let wheel = ZipArchive::new(File::open(wheel_path)?)?;
+    let drop_platform_specific_files = |file: &&str| -> bool {
+        !matches!(Path::new(file).extension(), Some(ext) if ext == "pyc" || ext == "pyd" || ext == "so")
+    };
+    assert_eq!(
+        wheel
+            .file_names()
+            .filter(drop_platform_specific_files)
+            .collect::<BTreeSet<_>>(),
+        expected_files.into_iter().collect::<BTreeSet<_>>()
+    );
     Ok(())
 }
 

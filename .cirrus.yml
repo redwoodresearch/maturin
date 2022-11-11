@@ -2,6 +2,8 @@ env:
   RUST_BACKTRACE: 1
 
 build_and_test: &BUILD_AND_TEST
+  # only run tasks on pull request or bors related branches
+  only_if: $CIRRUS_BRANCH == 'staging' || $CIRRUS_BRANCH == 'trying' || $CIRRUS_PR != ""
   setup_script:
     - curl https://sh.rustup.rs -sSf --output rustup.sh
     - sh rustup.sh -y --default-toolchain stable
@@ -15,7 +17,7 @@ build_and_test: &BUILD_AND_TEST
 freebsd_task:
   name: Test (x86_64 FreeBSD)
   freebsd_instance:
-    image_family: freebsd-12-2
+    image_family: freebsd-13-1
   env:
     PATH: $HOME/.cargo/bin:$PATH
   registry_cache:
@@ -55,11 +57,8 @@ macos_arm64_task:
 
 linux_aarch64_task:
   name: Test (arm64 Linux)
-  compute_engine_instance:
-    image_project: cirrus-images
-    image: family/docker-builder-arm64
-    architecture: arm64
-    platform: linux
+  arm_container:
+    image: python:3.11
     cpu: 4
     memory: 4G
   env:
@@ -74,7 +73,4 @@ linux_aarch64_task:
     fingerprint_script:
       - echo $CIRRUS_OS
       - cat Cargo.lock
-  install_script:
-    - apt-get update
-    - apt-get install -y python3-dev python3-pip python-is-python3
   <<: *BUILD_AND_TEST

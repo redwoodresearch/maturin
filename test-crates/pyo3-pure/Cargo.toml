@@ -2,13 +2,16 @@
 authors = ["konstin <konstin@mailbox.org>"]
 name = "pyo3-pure"
 version = "2.1.2"
-edition = "2018"
+edition = "2021"
 description = "Implements a dummy function (get_fortytwo.DummyClass.get_42()) in rust"
 license = "MIT"
 
 [dependencies]
-pyo3 = { version = "0.17.2", features = ["abi3-py37", "extension-module", "generate-import-lib"] }
+pyo3 = { version = "0.17.3", features = ["abi3-py37", "extension-module", "generate-import-lib"] }
 
 [lib]
 name = "pyo3_pure"
 crate-type = ["cdylib"]
+
+[workspace]
+members = [".", "local-test"]
